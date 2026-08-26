@@ -1,0 +1,38 @@
+services:
+  webhook-server:
+    build: .
+    container_name: webhook-server
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      KAFKA_URL: kafka:9092
+      KAFKA_TOPIC: webhooks
+
+    env_file:
+      - .env
+
+    networks:
+      - homelab
+
+  webhook-consumer:
+    build: .
+    container_name: webhook-consumer
+    restart: unless-stopped
+    command: ["python", "consumer.py"]
+
+    environment:
+      KAFKA_URL: kafka:9092
+      KAFKA_TOPIC: webhooks
+
+    env_file:
+      - .env
+
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true
