@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "fastapi[standard]" confluent-kafka
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY main.py consumer.py ./
 COPY routers ./routers

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
 
     ports:
-      - "8000:8000"
+      - "100.124.143.7:8000:8000"
 
     environment:
       KAFKA_URL: kafka:9092

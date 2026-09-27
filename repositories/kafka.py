@@ -1,63 +1,90 @@
 import json
+import logging
 import os
 import signal
-import sys
+from threading import Lock
 
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 
+from routers.webhooks.webhook_payload import WebhookPayload
+
 load_dotenv()
-
+logger = logging.getLogger(__name__)
 DEFAULT_TOPIC = os.getenv("KAFKA_TOPIC", "webhooks")
-
-producer = Producer(
-    {
-        "bootstrap.servers": os.getenv("KAFKA_URL"),
-    }
-)
+_producer: Producer | None = None
+_producer_lock = Lock()
 
 
-def delivery_report(err, msg):
-    if err is not None:
-        print(f"delivery failed: {err}", flush=True)
-    else:
-        print(
-            f"delivered to {msg.topic()} [{msg.partition()}] @ {msg.offset()}",
-            flush=True,
+class KafkaPublishError(RuntimeError):
+    pass
+
+
+def get_producer() -> Producer:
+    global _producer
+    if _producer is None:
+        with _producer_lock:
+            if _producer is None:
+                broker = os.getenv("KAFKA_URL")
+                if not broker:
+                    raise KafkaPublishError("KAFKA_URL is not configured")
+                _producer = Producer({"bootstrap.servers": broker})
+    return _producer
+
+
+def publish(topic: str, payload: dict, key: str) -> None:
+    outcome: dict[str, object] = {"called": False, "error": None}
+
+    def report(error, _message):
+        outcome["called"] = True
+        outcome["error"] = error
+
+    try:
+        producer = get_producer()
+        producer.produce(
+            topic,
+            key=key.encode(),
+            value=json.dumps(payload).encode(),
+            callback=report,
         )
+        remaining = producer.flush(10)
+    except Exception as exc:
+        raise KafkaPublishError("Could not send event to Kafka") from exc
+
+    if remaining or not outcome["called"]:
+        raise KafkaPublishError("Timed out waiting for Kafka delivery")
+    if outcome["error"] is not None:
+        raise KafkaPublishError(f"Kafka rejected event: {outcome['error']}")
 
 
-def publish(topic: str, payload: dict, key: str | None = None):
-    producer.produce(
-        topic,
-        key=key.encode() if key else None,
-        value=json.dumps(payload).encode(),
-        callback=delivery_report,
-    )
-    producer.poll(0)
-    producer.flush()
+def process_message(raw: bytes) -> None:
+    payload = WebhookPayload.model_validate_json(raw)
+    logger.info("received event_id=%s event=%s", payload.event_id, payload.event)
 
 
-def consume(topic: str = DEFAULT_TOPIC, group_id: str = "webhook-workers"):
+def consume(topic: str = DEFAULT_TOPIC, group_id: str = "webhook-workers") -> None:
+    broker = os.getenv("KAFKA_URL")
+    if not broker:
+        raise RuntimeError("KAFKA_URL is not configured")
+
     consumer = Consumer(
         {
-            "bootstrap.servers": os.getenv("KAFKA_URL"),
+            "bootstrap.servers": broker,
             "group.id": group_id,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": True,
+            "enable.auto.commit": False,
+            "enable.auto.offset.store": False,
         }
     )
     consumer.subscribe([topic])
-    print(f"consuming topic={topic} group={group_id}", flush=True)
-
     running = True
 
-    def _stop(*_args):
+    def stop(*_args):
         nonlocal running
         running = False
 
-    signal.signal(signal.SIGINT, _stop)
-    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
 
     try:
         while running:
@@ -65,32 +92,18 @@ def consume(topic: str = DEFAULT_TOPIC, group_id: str = "webhook-workers"):
             if message is None:
                 continue
             if message.error():
-                print(f"error: {message.error()}", flush=True)
+                logger.error("Kafka consumer error: %s", message.error())
                 continue
-
-            key = message.key().decode() if message.key() else None
             try:
-                value = json.loads(message.value().decode())
-            except (TypeError, json.JSONDecodeError):
-                value = message.value().decode() if message.value() else None
-
-            print(
-                json.dumps(
-                    {
-                        "topic": message.topic(),
-                        "partition": message.partition(),
-                        "offset": message.offset(),
-                        "key": key,
-                        "value": value,
-                    }
-                ),
-                flush=True,
-            )
+                process_message(message.value())
+                consumer.commit(message=message, asynchronous=False)
+            except Exception:
+                logger.exception(
+                    "Failed to process event at %s[%s] offset %s; leaving it uncommitted",
+                    message.topic(),
+                    message.partition(),
+                    message.offset(),
+                )
+                raise
     finally:
         consumer.close()
-        print("consumer closed", flush=True)
-
-
-if __name__ == "__main__":
-    topic = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TOPIC
-    consume(topic)
