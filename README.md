@@ -15,4 +15,6 @@ curl -X POST http://100.124.143.7:8000/api/webhook/gand_masti \
 
 Run the unit checks with `python -m unittest discover -s tests`. They cover delivery success, rejection, timeout, authentication, payload validation, and HTTP failure mapping.
 
+For a bounded load test after deployment, export `WEBHOOK_TOKEN` in your shell and run `python fuck.py --requests 100 --concurrency 5`. The script sends a unique event ID per request, prints status counts, throughput, and latency percentiles, and exits nonzero if any request is not accepted. It defaults to the host's Tailscale URL; use `--url` for another endpoint. It stops after the requested count.
+
 The delivery wait has a ten-second limit. A timeout means the outcome is unknown: Kafka may still deliver the event later. Callers should retry with the same event ID, and any real consumer operation should be idempotent. A malformed Kafka event currently stops the consumer without committing it so it can be investigated rather than silently skipped.
